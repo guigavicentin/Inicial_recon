@@ -25,8 +25,10 @@ FINGERPRINT_THREADS = 20
 CURL_TIMEOUT       = 5   # segundos
 
 # ── Caminhos dos scripts CVE (preencha aqui) ──
-NGINX_CVE_SCRIPT  = ""   # ex: "/opt/scripts/nginx_cve.py"
-APACHE_CVE_SCRIPT = ""   # ex: "/opt/scripts/apache_cve.py"
+NGINX_CVE_SCRIPT      = ""   # ex: "/opt/scripts/nginx_cve.py"
+APACHE_CVE_SCRIPT     = ""   # ex: "/opt/scripts/apache_cve.py"
+OPENRESTY_CVE_SCRIPT  = ""   # ex: "/opt/scripts/openresty_cve.py"
+HAPROXY_CVE_SCRIPT    = ""   # ex: "/opt/scripts/haproxy_cve.py"
 
 TOOLS_REQUIRED = ["subfinder", "assetfinder", "nmap", "httpx", "curl"]
 TOOLS_OPTIONAL = ["chaos", "github-subdomains", "shortscan"]
@@ -421,12 +423,16 @@ def _classify_server(raw: str) -> str:
         if kw in val:
             return "cloudflare_waf"
 
+    if "openresty" in val:
+        return "openresty"
     if "nginx" in val:
         return "nginx"
     if "apache" in val:
         return "apache"
     if "microsoft-iis" in val or "iis" in val:
         return "iis"
+    if "haproxy" in val:
+        return "haproxy"
     if val:
         return f"outro:{val}"
     return "desconhecido"
@@ -475,6 +481,9 @@ def _fingerprint_url(url: str, nmap_banners: dict) -> tuple[str, str]:
             shell=True, capture_output=True, text=True, timeout=CURL_TIMEOUT + 2
         )
         body = result.stdout.lower()
+        if "openresty" in body:
+            log(f"[fingerprint] {url} → openresty (curl body)", "INFO")
+            return url, "openresty"
         if "nginx" in body:
             log(f"[fingerprint] {url} → nginx (curl body)", "INFO")
             return url, "nginx"
@@ -484,6 +493,9 @@ def _fingerprint_url(url: str, nmap_banners: dict) -> tuple[str, str]:
         if "microsoft-iis" in body or "iis" in body:
             log(f"[fingerprint] {url} → iis (curl body)", "INFO")
             return url, "iis"
+        if "haproxy" in body:
+            log(f"[fingerprint] {url} → haproxy (curl body)", "INFO")
+            return url, "haproxy"
         for kw in CLOUDFLARE_WAF_KEYWORDS:
             if kw in body:
                 log(f"[fingerprint] {url} → cloudflare_waf (curl body)", "INFO")
@@ -606,6 +618,7 @@ def dispatch_cve_scripts(
     no_nginx: bool,
     no_apache: bool,
     no_iis: bool,
+    no_haproxy: bool = False,
     outdir: str = "",
 ):
     """
@@ -631,6 +644,12 @@ def dispatch_cve_scripts(
             else:
                 _run_script(NGINX_CVE_SCRIPT, url, "nginx_cve", outdir)
 
+        elif cls == "openresty":
+            if no_nginx:
+                log(f"[CVE] {url} → openresty (--no-nginx ativo, pulando)", "WARN")
+            else:
+                _run_script(OPENRESTY_CVE_SCRIPT, url, "openresty_cve", outdir)
+
         elif cls == "apache":
             if no_apache:
                 log(f"[CVE] {url} → apache (--no-apache ativo, pulando)", "WARN")
@@ -642,6 +661,12 @@ def dispatch_cve_scripts(
                 log(f"[CVE] {url} → IIS (--no-iis ativo, pulando)", "WARN")
             else:
                 _run_shortscan(url, outdir)
+
+        elif cls == "haproxy":
+            if no_haproxy:
+                log(f"[CVE] {url} → haproxy (--no-haproxy ativo, pulando)", "WARN")
+            else:
+                _run_script(HAPROXY_CVE_SCRIPT, url, "haproxy_cve", outdir)
 
         elif cls in ("cloudflare_waf", "desconhecido"):
             log(f"[CVE] {url} → {cls} → rodando nginx + apache", "WARN")
@@ -772,6 +797,10 @@ def main():
         help="Não executa shortscan em hosts IIS"
     )
     parser.add_argument(
+        "--no-haproxy", action="store_true",
+        help="Não executa o script CVE de HAProxy"
+    )
+    parser.add_argument(
         "--skip-cve", action="store_true",
         help="Pula a execução dos scripts CVE (mantém fingerprint)"
     )
@@ -845,6 +874,7 @@ def main():
             no_nginx=args.no_nginx,
             no_apache=args.no_apache,
             no_iis=args.no_iis,
+            no_haproxy=args.no_haproxy,
             outdir=outdir,
         )
     elif args.skip_cve:
