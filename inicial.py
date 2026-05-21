@@ -293,6 +293,10 @@ def build_alive_dedup(alive_file, outdir):
 
     lines = [l.strip() for l in Path(alive_file).read_text().splitlines() if l.strip()]
 
+    if not lines:
+        log("alive.txt existe mas está vazio — pulando dedup", "WARN")
+        return None
+
     # Normaliza: extrai (host, porta) sem protocolo
     seen   = {}   # (host, port) → url preferida (https > http)
     for url in lines:
@@ -336,6 +340,9 @@ def build_ips_only(ip_port_file, outdir):
             ips.add(ip)
 
     out = f"{outdir}/ips_only.txt"
+    if not ips:
+        log("Nenhum IP extraído para ips_only.txt", "WARN")
+        return None
     write_lines(out, sorted(ips))
     return out
 
@@ -483,7 +490,7 @@ def run_fingerprint(alive_dedup_file, nmap_banners: dict, outdir: str) -> dict:
 # EXECUÇÃO DOS SCRIPTS CVE / SHORTSCAN  (novo)
 # ──────────────────────────────────────────────
 
-def _run_script(script_path: str, url: str, label: str):
+def _run_script(script_path: str, url: str, label: str, outdir: str = ""):
     """Executa um script externo passando a URL como argumento."""
     if not script_path:
         log(f"Caminho do script {label} não configurado (edite NGINX_CVE_SCRIPT / APACHE_CVE_SCRIPT)", "WARN")
@@ -491,17 +498,23 @@ def _run_script(script_path: str, url: str, label: str):
     if not Path(script_path).exists():
         log(f"Script {label} não encontrado: {script_path}", "ERR")
         return
+    output_flag = ""
+    if outdir:
+        output_flag = f'--output "{outdir}/cve_results.txt"'
     log(f"Executando {label} em {url}")
-    run_cmd(f"python3 {script_path} {url}", timeout=300)
+    run_cmd(f'python3 "{script_path}" "{url}" {output_flag}', timeout=600)
 
 
-def _run_shortscan(url: str):
-    """Executa shortscan em uma URL."""
+def _run_shortscan(url: str, outdir: str = ""):
+    """Executa shortscan em uma URL e salva output em outdir."""
     if not tool_available("shortscan"):
         log("shortscan não instalado — pulando IIS scan", "WARN")
         return
     log(f"Executando shortscan em {url}")
-    run_cmd(f"shortscan {url}", timeout=120)
+    out_flag = ""
+    if outdir:
+        out_flag = f'>> "{outdir}/shortscan_results.txt" 2>&1'
+    run_cmd(f'shortscan "{url}" {out_flag}', timeout=120)
 
 
 def dispatch_cve_scripts(
@@ -510,6 +523,7 @@ def dispatch_cve_scripts(
     no_nginx: bool,
     no_apache: bool,
     no_iis: bool,
+    outdir: str = "",
 ):
     """
     Para cada host identificado, executa o script CVE correspondente.
@@ -540,30 +554,30 @@ def dispatch_cve_scripts(
                     log(f"[CVE] {host} → nginx (--no-nginx ativo, pulando)", "WARN")
                 else:
                     log(f"[CVE] {host} → nginx", "OK")
-                    _run_script(NGINX_CVE_SCRIPT, url, "nginx_cve")
+                    _run_script(NGINX_CVE_SCRIPT, url, "nginx_cve", outdir)
 
             elif cls == "apache":
                 if no_apache:
                     log(f"[CVE] {host} → apache (--no-apache ativo, pulando)", "WARN")
                 else:
                     log(f"[CVE] {host} → apache", "OK")
-                    _run_script(APACHE_CVE_SCRIPT, url, "apache_cve")
+                    _run_script(APACHE_CVE_SCRIPT, url, "apache_cve", outdir)
 
             elif cls == "iis":
                 if no_iis:
                     log(f"[CVE] {host} → IIS (--no-iis ativo, pulando)", "WARN")
                 else:
                     log(f"[CVE] {host} → IIS", "OK")
-                    _run_shortscan(url)
+                    _run_shortscan(url, outdir)
 
             elif cls in ("cloudflare_waf", "desconhecido"):
                 log(f"[CVE] {host} → {cls} → rodando nginx + apache", "WARN")
                 if not no_nginx:
-                    _run_script(NGINX_CVE_SCRIPT, url, "nginx_cve")
+                    _run_script(NGINX_CVE_SCRIPT, url, "nginx_cve", outdir)
                 else:
                     log(f"[CVE] nginx pulado (--no-nginx)", "WARN")
                 if not no_apache:
-                    _run_script(APACHE_CVE_SCRIPT, url, "apache_cve")
+                    _run_script(APACHE_CVE_SCRIPT, url, "apache_cve", outdir)
                 else:
                     log(f"[CVE] apache pulado (--no-apache)", "WARN")
 
@@ -684,6 +698,10 @@ def main():
         "--no-iis", action="store_true",
         help="Não executa shortscan em hosts IIS"
     )
+    parser.add_argument(
+        "--skip-cve", action="store_true",
+        help="Pula a execução dos scripts CVE (mantém fingerprint)"
+    )
     args = parser.parse_args()
 
     domain = args.domain.strip().lower()
@@ -742,14 +760,17 @@ def main():
         log("Fingerprint pulado (--skip-fingerprint)", "WARN")
 
     # 8. Dispatch CVE scripts (novo)
-    if fingerprint:
+    if fingerprint and not args.skip_cve:
         dispatch_cve_scripts(
             fingerprint,
             alive_dedup_file,
             no_nginx=args.no_nginx,
             no_apache=args.no_apache,
             no_iis=args.no_iis,
+            outdir=outdir,
         )
+    elif args.skip_cve:
+        log("Scripts CVE pulados (--skip-cve)", "WARN")
 
     # Resumo final
     print()
@@ -760,6 +781,10 @@ def main():
     log(f"Alive dedup                 : {outdir}/alive_dedup.txt", "OK")
     log(f"IPs only                    : {outdir}/ips_only.txt", "OK")
     log(f"Fingerprint de servidor     : {outdir}/server_fingerprint.txt", "OK")
+    if not args.skip_cve and fingerprint:
+        log(f"CVE results                 : {outdir}/cve_results.txt", "OK")
+        if any(v == "iis" for v in fingerprint.values()):
+            log(f"Shortscan results           : {outdir}/shortscan_results.txt", "OK")
     print()
     log(f"Recon finalizado! Resultados em: {outdir}/", "OK")
 
