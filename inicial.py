@@ -252,10 +252,36 @@ def run_nmap(subs_file, outdir):
 # HTTPX
 # ──────────────────────────────────────────────
 
+def _check_httpx_version():
+    """
+    Verifica se o httpx instalado é o do ProjectDiscovery (correto)
+    ou o pacote Python (incompatível com flags -l / -ports).
+    Retorna True se for o ProjectDiscovery.
+    """
+    try:
+        # Testa flag -l com arquivo vazio — só PD httpx aceita
+        test = subprocess.run(
+            "echo '' | httpx -l /dev/stdin -silent 2>&1 | head -1",
+            shell=True, capture_output=True, text=True, timeout=8
+        )
+        output = (test.stdout + test.stderr).lower()
+        if "no such option" in output or "usage: httpx [options] url" in output:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def run_httpx(subs_file, outdir):
     log("=== HTTPX ===")
     alive_file = f"{outdir}/alive.txt"
     alive_json = f"{outdir}/alive_json.txt"
+
+    if not _check_httpx_version():
+        log("httpx instalado não é o ProjectDiscovery — flags -l/-ports não suportadas", "ERR")
+        log("Instale: go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest", "ERR")
+        log("Pulando httpx — fingerprint usará fallback via ips_ativos_com_protocolo.txt", "WARN")
+        return None, None
 
     cmd = (
         f"httpx -l {subs_file} "
@@ -741,25 +767,30 @@ def main():
     alive_file, alive_json = run_httpx(subs_file, outdir)
 
     # 4. Parse & consolidação
-    entries = parse_httpx_json(alive_json)
+    entries = parse_httpx_json(alive_json) if alive_json else []
     log(f"HTTPX retornou {len(entries)} URLs ativas", "OK")
 
     sub_ports_file, ip_url_file, ip_port_file = build_output_files(entries, nmap_results, outdir)
 
-    # 5. Alive dedup (novo)
-    alive_dedup_file = build_alive_dedup(alive_file, outdir)
+    # 5. Alive dedup
+    alive_dedup_file = build_alive_dedup(alive_file, outdir) if alive_file else None
 
-    # 6. IPs only (novo)
+    # 5b. Fallback: se httpx falhou, gera alive_dedup a partir de ips_ativos_com_protocolo.txt
+    if not alive_dedup_file and Path(ip_url_file).exists():
+        log("Fallback: gerando alive_dedup.txt a partir de ips_ativos_com_protocolo.txt", "WARN")
+        alive_dedup_file = build_alive_dedup(ip_url_file, outdir)
+
+    # 6. IPs only
     build_ips_only(ip_port_file, outdir)
 
-    # 7. Fingerprint (novo)
+    # 7. Fingerprint
     fingerprint = {}
     if not args.skip_fingerprint:
         fingerprint = run_fingerprint(alive_dedup_file, nmap_banners, outdir)
     else:
         log("Fingerprint pulado (--skip-fingerprint)", "WARN")
 
-    # 8. Dispatch CVE scripts (novo)
+    # 8. Dispatch CVE scripts
     if fingerprint and not args.skip_cve:
         dispatch_cve_scripts(
             fingerprint,
@@ -773,18 +804,25 @@ def main():
         log("Scripts CVE pulados (--skip-cve)", "WARN")
 
     # Resumo final
+    httpx_ok = alive_file and Path(alive_file).exists()
     print()
     log("══════════════ RESUMO ══════════════", "OK")
     log(f"Subdomínios ativos + portas : {sub_ports_file}", "OK")
     log(f"IPs com protocolo           : {ip_url_file}", "OK")
     log(f"IPs + porta (simples)       : {ip_port_file}", "OK")
-    log(f"Alive dedup                 : {outdir}/alive_dedup.txt", "OK")
+    if httpx_ok:
+        log(f"Alive dedup                 : {outdir}/alive_dedup.txt", "OK")
+    else:
+        log(f"Alive dedup                 : {outdir}/alive_dedup.txt (fallback via nmap)", "WARN")
     log(f"IPs only                    : {outdir}/ips_only.txt", "OK")
     log(f"Fingerprint de servidor     : {outdir}/server_fingerprint.txt", "OK")
     if not args.skip_cve and fingerprint:
         log(f"CVE results                 : {outdir}/cve_results.txt", "OK")
         if any(v == "iis" for v in fingerprint.values()):
             log(f"Shortscan results           : {outdir}/shortscan_results.txt", "OK")
+    if not httpx_ok:
+        log("ATENÇÃO: httpx não funcionou — instale o ProjectDiscovery httpx para cobertura completa", "WARN")
+        log("         go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest", "WARN")
     print()
     log(f"Recon finalizado! Resultados em: {outdir}/", "OK")
 
