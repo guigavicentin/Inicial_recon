@@ -252,24 +252,54 @@ def run_nmap(subs_file, outdir):
 # HTTPX
 # ──────────────────────────────────────────────
 
-def _check_httpx_version():
+# Caminhos candidatos para o httpx do ProjectDiscovery
+HTTPX_PD_CANDIDATES = [
+    "/root/go/bin/httpx",
+    "/home/ubuntu/go/bin/httpx",
+    "/usr/local/go/bin/httpx",
+]
+
+
+def _find_pd_httpx():
     """
-    Verifica se o httpx instalado é o do ProjectDiscovery (correto)
-    ou o pacote Python (incompatível com flags -l / -ports).
-    Retorna True se for o ProjectDiscovery.
+    Procura o binário httpx do ProjectDiscovery em:
+    1. Caminhos conhecidos do Go
+    2. PATH — mas verifica se aceita flag -l
+    Retorna o path do binário ou None.
     """
-    try:
-        # Testa flag -l com arquivo vazio — só PD httpx aceita
-        test = subprocess.run(
-            "echo '' | httpx -l /dev/stdin -silent 2>&1 | head -1",
-            shell=True, capture_output=True, text=True, timeout=8
-        )
-        output = (test.stdout + test.stderr).lower()
-        if "no such option" in output or "usage: httpx [options] url" in output:
-            return False
-        return True
-    except Exception:
-        return False
+    import shutil as _shutil
+
+    # Tenta caminhos fixos do Go primeiro
+    for candidate in HTTPX_PD_CANDIDATES:
+        if Path(candidate).exists():
+            try:
+                r = subprocess.run(
+                    [candidate, "-version"],
+                    capture_output=True, text=True, timeout=5
+                )
+                out = (r.stdout + r.stderr).lower()
+                if "no such option" not in out:
+                    log(f"httpx ProjectDiscovery encontrado: {candidate}", "OK")
+                    return candidate
+            except Exception:
+                continue
+
+    # Tenta o httpx do PATH — verifica se é o PD
+    httpx_in_path = _shutil.which("httpx")
+    if httpx_in_path:
+        try:
+            r = subprocess.run(
+                f'echo "" | {httpx_in_path} -l /dev/stdin -silent 2>&1 | head -1',
+                shell=True, capture_output=True, text=True, timeout=8
+            )
+            out = (r.stdout + r.stderr).lower()
+            if "no such option" not in out and "usage: httpx [options] url" not in out:
+                log(f"httpx ProjectDiscovery encontrado no PATH: {httpx_in_path}", "OK")
+                return httpx_in_path
+        except Exception:
+            pass
+
+    return None
 
 
 def run_httpx(subs_file, outdir):
@@ -277,14 +307,16 @@ def run_httpx(subs_file, outdir):
     alive_file = f"{outdir}/alive.txt"
     alive_json = f"{outdir}/alive_json.txt"
 
-    if not _check_httpx_version():
-        log("httpx instalado não é o ProjectDiscovery — flags -l/-ports não suportadas", "ERR")
-        log("Instale: go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest", "ERR")
+    httpx_bin = _find_pd_httpx()
+    if not httpx_bin:
+        log("httpx ProjectDiscovery não encontrado", "ERR")
+        log("Adicione ao PATH: export PATH=/root/go/bin:$PATH", "ERR")
+        log("Ou instale: go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest", "ERR")
         log("Pulando httpx — fingerprint usará fallback via ips_ativos_com_protocolo.txt", "WARN")
         return None, None
 
     cmd = (
-        f"httpx -l {subs_file} "
+        f"{httpx_bin} -l {subs_file} "
         f"-ports {PORTS} "
         f"-threads {HTTPX_THREADS} "
         f"-json "
@@ -293,7 +325,7 @@ def run_httpx(subs_file, outdir):
     run_cmd(cmd, timeout=900)
 
     cmd2 = (
-        f"httpx -l {subs_file} "
+        f"{httpx_bin} -l {subs_file} "
         f"-ports {PORTS} "
         f"-threads {HTTPX_THREADS} "
         f"-o {alive_file}"
@@ -402,24 +434,24 @@ def _classify_server(raw: str) -> str:
 
 def _fingerprint_url(url: str, nmap_banners: dict) -> tuple[str, str]:
     """
-    Tenta identificar o servidor de uma URL.
+    Tenta identificar o servidor de uma URL específica (IP:porta).
     Ordem: nmap banner → curl header Server → curl body de erro.
-    Retorna (host, classificacao).
+    Retorna (url, classificacao) — chave é a URL completa, não só o host.
     """
     m = re.match(r"https?://([^/:]+)", url)
     if not m:
         return url, "desconhecido"
     host = m.group(1)
 
-    # 1. Banner do nmap
+    # 1. Banner do nmap (por host — nmap não distingue porta aqui)
     if host in nmap_banners:
         banner_val = nmap_banners[host]
         cls = _classify_server(banner_val)
         if cls not in ("desconhecido",):
-            log(f"[fingerprint] {host} → {cls} (nmap banner)", "INFO")
-            return host, cls
+            log(f"[fingerprint] {url} → {cls} (nmap banner)", "INFO")
+            return url, cls
 
-    # 2. curl header Server:
+    # 2. curl header Server: desta URL específica (porta inclusa)
     try:
         result = subprocess.run(
             f"curl -sk -o /dev/null -D - --max-time {CURL_TIMEOUT} {url}",
@@ -430,12 +462,12 @@ def _fingerprint_url(url: str, nmap_banners: dict) -> tuple[str, str]:
                 server_val = line.split(":", 1)[1].strip()
                 cls = _classify_server(server_val)
                 if cls not in ("desconhecido",):
-                    log(f"[fingerprint] {host} → {cls} (curl header)", "INFO")
-                    return host, cls
+                    log(f"[fingerprint] {url} → {cls} (curl header)", "INFO")
+                    return url, cls
     except Exception:
         pass
 
-    # 3. curl body de erro (path inexistente)
+    # 3. curl body de erro nesta porta específica
     try:
         error_url = url.rstrip("/") + "/____recon_probe_404____"
         result = subprocess.run(
@@ -444,29 +476,30 @@ def _fingerprint_url(url: str, nmap_banners: dict) -> tuple[str, str]:
         )
         body = result.stdout.lower()
         if "nginx" in body:
-            log(f"[fingerprint] {host} → nginx (curl body)", "INFO")
-            return host, "nginx"
+            log(f"[fingerprint] {url} → nginx (curl body)", "INFO")
+            return url, "nginx"
         if "apache" in body:
-            log(f"[fingerprint] {host} → apache (curl body)", "INFO")
-            return host, "apache"
+            log(f"[fingerprint] {url} → apache (curl body)", "INFO")
+            return url, "apache"
         if "microsoft-iis" in body or "iis" in body:
-            log(f"[fingerprint] {host} → iis (curl body)", "INFO")
-            return host, "iis"
+            log(f"[fingerprint] {url} → iis (curl body)", "INFO")
+            return url, "iis"
         for kw in CLOUDFLARE_WAF_KEYWORDS:
             if kw in body:
-                log(f"[fingerprint] {host} → cloudflare_waf (curl body)", "INFO")
-                return host, "cloudflare_waf"
+                log(f"[fingerprint] {url} → cloudflare_waf (curl body)", "INFO")
+                return url, "cloudflare_waf"
     except Exception:
         pass
 
-    log(f"[fingerprint] {host} → desconhecido", "WARN")
-    return host, "desconhecido"
+    log(f"[fingerprint] {url} → desconhecido", "WARN")
+    return url, "desconhecido"
 
 
 def run_fingerprint(alive_dedup_file, nmap_banners: dict, outdir: str) -> dict:
     """
-    Roda fingerprint em paralelo em todos os hosts do alive_dedup.txt.
-    Retorna dict {host: classificacao}.
+    Roda fingerprint em paralelo em todas as URLs do alive_dedup.txt.
+    Chave do resultado é a URL completa (ex: http://1.2.3.4:8080) — não só o IP.
+    Retorna dict {url: classificacao}.
     """
     log("=== FINGERPRINT DE SERVIDOR ===")
 
@@ -479,24 +512,17 @@ def run_fingerprint(alive_dedup_file, nmap_banners: dict, outdir: str) -> dict:
         log("Nenhuma URL para fingerprint", "WARN")
         return {}
 
+    log(f"Iniciando fingerprint em {len(urls)} URLs (threads={FINGERPRINT_THREADS})", "INFO")
+
     results = {}
     with ThreadPoolExecutor(max_workers=FINGERPRINT_THREADS) as executor:
         futures = {executor.submit(_fingerprint_url, url, nmap_banners): url for url in urls}
         for future in as_completed(futures):
-            host, cls = future.result()
-            # Guarda apenas a melhor classificação por host (nginx/apache > cloudflare > desconhecido)
-            priority = {"nginx": 0, "apache": 0, "iis": 0, "cloudflare_waf": 1, "desconhecido": 2}
-            existing = results.get(host)
-            if existing is None:
-                results[host] = cls
-            else:
-                p_new = priority.get(cls, 0) if not cls.startswith("outro:") else 0
-                p_old = priority.get(existing, 0) if not existing.startswith("outro:") else 0
-                if p_new < p_old:
-                    results[host] = cls
+            url_key, cls = future.result()
+            results[url_key] = cls
 
-    # Salva log de fingerprint
-    fp_lines = [f"{host} - {cls}" for host, cls in sorted(results.items())]
+    # Salva log de fingerprint — agora por URL:porta
+    fp_lines = [f"{url_key} - {cls}" for url_key, cls in sorted(results.items())]
     fp_file  = f"{outdir}/server_fingerprint.txt"
     write_lines(fp_file, fp_lines)
     log(f"Fingerprint salvo em: {fp_file}", "OK")
@@ -507,7 +533,7 @@ def run_fingerprint(alive_dedup_file, nmap_banners: dict, outdir: str) -> dict:
         (c if not c.startswith("outro:") else "outro") for c in results.values()
     )
     for cat, n in sorted(counts.items()):
-        log(f"  {cat}: {n} host(s)", "OK")
+        log(f"  {cat}: {n} URL(s)", "OK")
 
     return results
 
@@ -517,18 +543,49 @@ def run_fingerprint(alive_dedup_file, nmap_banners: dict, outdir: str) -> dict:
 # ──────────────────────────────────────────────
 
 def _run_script(script_path: str, url: str, label: str, outdir: str = ""):
-    """Executa um script externo passando a URL como argumento."""
+    """
+    Executa script CVE externo com output em tempo real (streaming).
+    Printa cada linha conforme sai, sem buffering.
+    """
     if not script_path:
         log(f"Caminho do script {label} não configurado (edite NGINX_CVE_SCRIPT / APACHE_CVE_SCRIPT)", "WARN")
         return
     if not Path(script_path).exists():
         log(f"Script {label} não encontrado: {script_path}", "ERR")
         return
-    output_flag = ""
+
+    output_flag = []
     if outdir:
-        output_flag = f'--output "{outdir}/cve_results.txt"'
-    log(f"Executando {label} em {url}")
-    run_cmd(f'python3 "{script_path}" "{url}" {output_flag}', timeout=600)
+        output_flag = ["--output", f"{outdir}/cve_results.txt"]
+
+    cmd_parts = ["python3", "-u", script_path, url] + output_flag
+    log(f"{'─'*60}", "INFO")
+    log(f"Iniciando {label} → {url}", "OK")
+    log(f"{'─'*60}", "INFO")
+
+    try:
+        proc = subprocess.Popen(
+            cmd_parts,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        # Streaming linha a linha
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                print(line)
+        proc.wait(timeout=600)
+        if proc.returncode != 0:
+            log(f"{label} encerrou com código {proc.returncode}", "WARN")
+        else:
+            log(f"{label} concluído em {url}", "OK")
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        log(f"Timeout ao executar {label}", "WARN")
+    except Exception as e:
+        log(f"Erro ao executar {label}: {e}", "ERR")
 
 
 def _run_shortscan(url: str, outdir: str = ""):
@@ -561,58 +618,48 @@ def dispatch_cve_scripts(
         log("alive_dedup.txt não encontrado, pulando CVE dispatch", "WARN")
         return
 
-    # Mapeia host → lista de URLs (pode ter porta não-padrão)
-    host_urls: dict[str, list[str]] = {}
-    for line in Path(alive_dedup_file).read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        m = re.match(r"https?://([^/:]+)", line)
-        if m:
-            host_urls.setdefault(m.group(1), []).append(line)
+    # fingerprint agora é {url: cls} — itera diretamente por URL:porta
+    total = len(fingerprint)
+    log(f"Disparando CVE scripts para {total} URL(s) identificadas", "INFO")
 
-    for host, cls in sorted(fingerprint.items()):
-        urls = host_urls.get(host, [f"http://{host}"])
+    for idx, (url, cls) in enumerate(sorted(fingerprint.items()), 1):
+        log(f"[CVE {idx}/{total}] {url} → {cls}", "INFO")
 
-        for url in urls:
-            if cls == "nginx":
-                if no_nginx:
-                    log(f"[CVE] {host} → nginx (--no-nginx ativo, pulando)", "WARN")
-                else:
-                    log(f"[CVE] {host} → nginx", "OK")
-                    _run_script(NGINX_CVE_SCRIPT, url, "nginx_cve", outdir)
-
-            elif cls == "apache":
-                if no_apache:
-                    log(f"[CVE] {host} → apache (--no-apache ativo, pulando)", "WARN")
-                else:
-                    log(f"[CVE] {host} → apache", "OK")
-                    _run_script(APACHE_CVE_SCRIPT, url, "apache_cve", outdir)
-
-            elif cls == "iis":
-                if no_iis:
-                    log(f"[CVE] {host} → IIS (--no-iis ativo, pulando)", "WARN")
-                else:
-                    log(f"[CVE] {host} → IIS", "OK")
-                    _run_shortscan(url, outdir)
-
-            elif cls in ("cloudflare_waf", "desconhecido"):
-                log(f"[CVE] {host} → {cls} → rodando nginx + apache", "WARN")
-                if not no_nginx:
-                    _run_script(NGINX_CVE_SCRIPT, url, "nginx_cve", outdir)
-                else:
-                    log(f"[CVE] nginx pulado (--no-nginx)", "WARN")
-                if not no_apache:
-                    _run_script(APACHE_CVE_SCRIPT, url, "apache_cve", outdir)
-                else:
-                    log(f"[CVE] apache pulado (--no-apache)", "WARN")
-
-            elif cls.startswith("outro:"):
-                servidor = cls.split(":", 1)[1]
-                log(f"[CVE] {host} → servidor identificado: {servidor} (sem script disponível)", "INFO")
-
+        if cls == "nginx":
+            if no_nginx:
+                log(f"[CVE] {url} → nginx (--no-nginx ativo, pulando)", "WARN")
             else:
-                log(f"[CVE] {host} → classificação inesperada: {cls}", "WARN")
+                _run_script(NGINX_CVE_SCRIPT, url, "nginx_cve", outdir)
+
+        elif cls == "apache":
+            if no_apache:
+                log(f"[CVE] {url} → apache (--no-apache ativo, pulando)", "WARN")
+            else:
+                _run_script(APACHE_CVE_SCRIPT, url, "apache_cve", outdir)
+
+        elif cls == "iis":
+            if no_iis:
+                log(f"[CVE] {url} → IIS (--no-iis ativo, pulando)", "WARN")
+            else:
+                _run_shortscan(url, outdir)
+
+        elif cls in ("cloudflare_waf", "desconhecido"):
+            log(f"[CVE] {url} → {cls} → rodando nginx + apache", "WARN")
+            if not no_nginx:
+                _run_script(NGINX_CVE_SCRIPT, url, "nginx_cve", outdir)
+            else:
+                log(f"[CVE] nginx pulado (--no-nginx)", "WARN")
+            if not no_apache:
+                _run_script(APACHE_CVE_SCRIPT, url, "apache_cve", outdir)
+            else:
+                log(f"[CVE] apache pulado (--no-apache)", "WARN")
+
+        elif cls.startswith("outro:"):
+            servidor = cls.split(":", 1)[1]
+            log(f"[CVE] {url} → servidor: {servidor} (sem script disponível)", "INFO")
+
+        else:
+            log(f"[CVE] {url} → classificação inesperada: {cls}", "WARN")
 
 
 # ──────────────────────────────────────────────
