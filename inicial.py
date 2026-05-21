@@ -25,8 +25,8 @@ FINGERPRINT_THREADS = 20
 CURL_TIMEOUT       = 5   # segundos
 
 # ── Caminhos dos scripts CVE (preencha aqui) ──
-NGINX_CVE_SCRIPT  = ""   # ex: "nginx_cve.py"
-APACHE_CVE_SCRIPT = ""   # ex: "apache_cve.py"
+NGINX_CVE_SCRIPT  = ""   # ex: "/opt/scripts/nginx_cve.py"
+APACHE_CVE_SCRIPT = ""   # ex: "/opt/scripts/apache_cve.py"
 
 TOOLS_REQUIRED = ["subfinder", "assetfinder", "nmap", "httpx", "curl"]
 TOOLS_OPTIONAL = ["chaos", "github-subdomains", "shortscan"]
