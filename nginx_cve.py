@@ -19,6 +19,7 @@ import sys
 import time
 import argparse
 import re
+from urllib.parse import urlparse
 
 # Importa lib base (deve estar no mesmo diretório)
 try:
@@ -139,7 +140,7 @@ def check_cve_2021_23017(url, nginx_ver, collector):
                       detail=f"Versão nginx/{nginx_ver} >= 1.20.1")
 
 
-def check_cve_2023_44487(url, collector, server_info=None):
+def check_cve_2023_44487(url, collector, server_info=f"nginx/{nginx_ver}"):
     """
     Recebe url já filtrada pelo recon.py:
     - Não é CDN conhecido
