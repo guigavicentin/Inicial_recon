@@ -139,31 +139,22 @@ def check_cve_2021_23017(url, nginx_ver, collector):
                       detail=f"Versão nginx/{nginx_ver} >= 1.20.1")
 
 
-def check_cve_2023_44487(url, collector):
+def check_cve_2023_44487(url, collector, server_info=None):
     """
-    CVE-2023-44487 — HTTP/2 Rapid Reset (RST_STREAM flood)
-    Detecção em 3 níveis:
-      1. HTTP/2 ativo via ALPN
-      2. SETTINGS_MAX_CONCURRENT_STREAMS ausente
-      3. Ausência de GOAWAY
+    Recebe url já filtrada pelo recon.py:
+    - Não é CDN conhecido
+    - É nginx/apache/haproxy confirmado
+    - URL tem protocolo + porta corretos
     """
     cve = "CVE-2023-44487"
-    log(f"Testando {cve} em {url}", "INFO")
 
-    from urllib.parse import urlparse
-
-    # HTTP plaintext — checar h2c antes de descartar
+    # HTTP plaintext — skip
     if url.startswith("http://"):
-        status, hdrs, body, raw = curl(url, extra_flags="-v --http2")
-        h2c_active = "h2c" in hdrs.lower() or "upgrade: h2c" in raw.lower()
-        if not h2c_active:
-            collector.add(url, cve, "NOT_VULNERABLE",
-                          detail="HTTP plaintext — HTTP/2 não aplicável")
-            return
-        # h2c detectado — continua o check
+        collector.add(url, cve, "NOT_APPLICABLE",
+                      detail="HTTP plaintext — HTTP/2 não aplicável")
+        return
 
-    else:
-        status, hdrs, body, raw = curl(url, extra_flags="-v --http2")
+    status, hdrs, body, raw = curl(url, extra_flags="-v --http2")
 
     # Nível 1 — HTTP/2 ativo?
     h2_active = (
@@ -172,39 +163,30 @@ def check_cve_2023_44487(url, collector):
         or "using http/2" in raw.lower()
     )
     if not h2_active:
-        collector.add(url, cve, "NOT_VULNERABLE",
-                      detail="HTTP/2 não detectado")
+        collector.add(url, cve, "NOT_APPLICABLE",
+                      detail="HTTP/2 não negociado")
         return
 
-    # Nível 2 — Servidor limita streams?
-    has_stream_limit = (
-        "MAX_CONCURRENT_STREAMS" in raw
-        or "SETTINGS_MAX_CONCURRENT" in raw
-    )
-
-    # Nível 3 — Servidor emitiu GOAWAY?
-    has_goaway = "GOAWAY" in raw
+    # Nível 2 — Mitigação detectável?
+    has_stream_limit = "MAX_CONCURRENT_STREAMS" in raw
+    has_goaway       = "GOAWAY" in raw
 
     if has_stream_limit or has_goaway:
-        detail = "HTTP/2 ativo com mitigação detectada"
-        detail += " (SETTINGS_MAX_CONCURRENT_STREAMS)" if has_stream_limit else ""
-        detail += " (GOAWAY emitido)" if has_goaway else ""
-        collector.add(url, cve, "POSSIBLY_MITIGATED",
-                      detail=detail,
-                      severity="INFO")
+        collector.add(url, cve, "MITIGATED",
+                      detail="Mitigação detectada via frames HTTP/2")
         return
 
-    # Sem mitigação detectada — construir repro correto
-    parsed   = urlparse(url)
-    host     = parsed.netloc
-    repro_url = f"https://{host}:443"
+    # Nível 3 — Versão conhecida vulnerável? (via nmap banner)
+    version_note = ""
+    if server_info:
+        version_note = f" | servidor: {server_info}"
 
-    critical_keywords = [
-        "api", "painel", "internal", "inventory",
-        "logs", "admin", "auth", "dashboard",
-        "marketplace", "radar", "lb", "cdn"
-    ]
-    severity = "CRITICAL" if any(k in url for k in critical_keywords) else "HIGH"
+    # Chegou aqui: HTTP/2 ativo, sem mitigação, não é CDN
+    # → POSSIBLY_VULNERABLE (curl não prova flood)
+    parsed    = urlparse(url)
+    host      = parsed.hostname
+    port      = parsed.port or 443
+    repro_url = f"https://{host}:{port}"
 
     repro = (
         f"# 1. Confirmar HTTP/2:\n"
@@ -212,19 +194,17 @@ def check_cve_2023_44487(url, collector):
         f"# 2. Validar RST_STREAM flood:\n"
         f"go run main.go -url {repro_url} "
         f"-requests 100 -concurrency 10 -delay 0 -wait 0\n\n"
-        f"# Resultado esperado se vulnerável:\n"
+        f"# Confirmado se:\n"
         f"# Frames sent: HEADERS=100, RST_STREAM=100\n"
-        f"# Frames received: 2 (apenas handshake — sem GOAWAY)"
+        f"# Frames received: 2 (apenas handshake)"
     )
 
-    collector.add(url, cve, "VULNERABLE",
+    collector.add(url, cve, "POSSIBLY_VULNERABLE",
                   detail=(
-                      "HTTP/2 ativo — sem SETTINGS_MAX_CONCURRENT_STREAMS "
-                      "e sem GOAWAY — suscetível a RST_STREAM flood"
+                      f"HTTP/2 ativo — sem mitigação detectável"
+                      f"{version_note}"
                   ),
-                  severity=severity,
                   curl_repro=repro)
-
 
 def check_log4shell(url, collector, iactsh):
     """
