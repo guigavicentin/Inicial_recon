@@ -122,22 +122,72 @@ def check_cve_2026_42945(url, collector, iactsh):
     collector.add(url, cve, "NOT_VULNERABLE", detail=f"HTTP {status}")
 
 
-def check_cve_2023_44487(url, collector):
-    """CVE-2023-44487 — HTTP/2 Rapid Reset"""
+def check_cve_2023_44487(url, collector, server_info=None):
+    """
+    Recebe url já filtrada pelo recon.py:
+    - Não é CDN conhecido
+    - É nginx/apache/haproxy confirmado
+    - URL tem protocolo + porta corretos
+    """
     cve = "CVE-2023-44487"
-    log(f"Testando {cve} em {url}", "INFO")
 
-    status, hdrs, body, _ = curl(url, extra_flags="--http2")
-    if "HTTP/2" in hdrs:
-        repro = (
-            f'curl -v --http2 "{url}"\n'
-            f"# HTTP/2 ativo — RST_STREAM flood via h2load ou wrk2"
-        )
-        collector.add(url, cve, "VULNERABLE",
-                      detail="HTTP/2 habilitado — suscetível a Rapid Reset",
-                      curl_repro=repro)
-    else:
-        collector.add(url, cve, "NOT_VULNERABLE", detail="HTTP/2 não detectado")
+    # HTTP plaintext — skip
+    if url.startswith("http://"):
+        collector.add(url, cve, "NOT_APPLICABLE",
+                      detail="HTTP plaintext — HTTP/2 não aplicável")
+        return
+
+    status, hdrs, body, raw = curl(url, extra_flags="-v --http2")
+
+    # Nível 1 — HTTP/2 ativo?
+    h2_active = (
+        "HTTP/2" in hdrs
+        or "server accepted h2" in raw.lower()
+        or "using http/2" in raw.lower()
+    )
+    if not h2_active:
+        collector.add(url, cve, "NOT_APPLICABLE",
+                      detail="HTTP/2 não negociado")
+        return
+
+    # Nível 2 — Mitigação detectável?
+    has_stream_limit = "MAX_CONCURRENT_STREAMS" in raw
+    has_goaway       = "GOAWAY" in raw
+
+    if has_stream_limit or has_goaway:
+        collector.add(url, cve, "MITIGATED",
+                      detail="Mitigação detectada via frames HTTP/2")
+        return
+
+    # Nível 3 — Versão conhecida vulnerável? (via nmap banner)
+    version_note = ""
+    if server_info:
+        version_note = f" | servidor: {server_info}"
+
+    # Chegou aqui: HTTP/2 ativo, sem mitigação, não é CDN
+    # → POSSIBLY_VULNERABLE (curl não prova flood)
+    parsed    = urlparse(url)
+    host      = parsed.hostname
+    port      = parsed.port or 443
+    repro_url = f"https://{host}:{port}"
+
+    repro = (
+        f"# 1. Confirmar HTTP/2:\n"
+        f'curl -v --http2 "{url}"\n\n'
+        f"# 2. Validar RST_STREAM flood:\n"
+        f"go run main.go -url {repro_url} "
+        f"-requests 100 -concurrency 10 -delay 0 -wait 0\n\n"
+        f"# Confirmado se:\n"
+        f"# Frames sent: HEADERS=100, RST_STREAM=100\n"
+        f"# Frames received: 2 (apenas handshake)"
+    )
+
+    collector.add(url, cve, "POSSIBLY_VULNERABLE",
+                  detail=(
+                      f"HTTP/2 ativo — sem mitigação detectável"
+                      f"{version_note}"
+                  ),
+                  curl_repro=repro)
 
 
 def check_cve_2021_23017(url, nginx_ver, collector):
