@@ -197,9 +197,9 @@ def check_cve_2021_40346(url, collector):
         return
 
     # Indício mais leve: servidor aceita header numérico sem rejeitar
-    if status1 not in (400, 0) and "haproxy" not in body1.lower():
-        collector.add(url, cve, "VULNERABLE",
-                      detail=f"Header numérico aceito sem rejeição (HTTP {status1}) — validar manualmente",
+if status1 not in (400, 0) and "haproxy" not in body1.lower():
+    collector.add(url, cve, "POSSIBLY_VULNERABLE", 
+                  detail=f"Header numérico aceito sem rejeição (HTTP {status1}) — validar manualmente")
                       curl_repro=(
                           f'curl -v \\\n'
                           f'  -H "Content-Length: 0" \\\n'
