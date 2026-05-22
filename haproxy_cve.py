@@ -506,7 +506,7 @@ def main():
         check_cve_2023_45539(url, collector)
         check_cve_2021_40346(url, collector)
         check_cve_2024_45506(url, collector, haproxy_ver)
-        check_cve_2023_44487(url, collector)
+        check_cve_2023_44487(url, collector, server_info=f"haproxy/{haproxy_ver}")
         check_cve_2022_0711(url, collector)
 
         log("── HAProxy Info / Misconfig ──", "INFO")
