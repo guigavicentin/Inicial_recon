@@ -571,7 +571,7 @@ def main():
         log("── CVEs herdadas do Nginx ──", "INFO")
         check_cve_2026_42945(url, collector, iactsh)
         check_cve_2021_23017(url, nginx_ver, collector)
-        check_cve_2023_44487(url, collector)
+        check_cve_2023_44487(url, collector, server_info=f"openresty/{or_ver} nginx/{nginx_ver}")
         check_log4shell(url, collector, iactsh)
         check_cve_2025_29927(url, collector)
         check_cve_2024_4577(url, collector)
