@@ -26,6 +26,7 @@ import sys
 import time
 import argparse
 import re
+from urllib.parse import urlparse
 
 try:
     from cve_base import (
