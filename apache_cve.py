@@ -23,6 +23,7 @@ import sys
 import time
 import argparse
 import re
+from urllib.parse import urlparse
 
 try:
     from cve_base import (
@@ -581,7 +582,7 @@ def main():
         # ── Comuns Apache + Tomcat
         log("── CVEs comuns (Java / HTTP) ──", "INFO")
         check_log4shell(url, collector, iactsh)
-        check_cve_2023_44487(url, collector)
+        check_cve_2023_44487(url, collector, server_info=f"{server_type}/{server_ver}")
 
     finally:
         if iactsh:
