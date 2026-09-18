@@ -12,6 +12,7 @@ import time
 import shutil
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 # ──────────────────────────────────────────────
 # CONFIGURAÇÕES GLOBAIS
@@ -349,7 +350,7 @@ class ResultCollector:
 
         with self._lock:
             # Append ao arquivo (múltiplos hosts no mesmo arquivo)
-            with open(path, "a") as f:
+            with open(path, "a", encoding="utf-8") as f:
                 f.write("\n".join(lines) + "\n\n")
 
         log(f"Resultados salvos em: {path}  ({len(vulns)} vulnerável(is) de {len(self._results)} testes)", "OK")
@@ -362,3 +363,56 @@ class ResultCollector:
             "vulnerable": len(vulns),
             "vulns":      vulns,
         }
+
+
+# ──────────────────────────────────────────────
+# CVE COMPARTILHADA — HTTP/2 Rapid Reset
+# ──────────────────────────────────────────────
+
+def check_cve_2023_44487(url, collector, server_info=None):
+    """
+    CVE-2023-44487 — HTTP/2 Rapid Reset (RST_STREAM flood)
+    Compartilhada entre nginx, apache, haproxy e openresty.
+    Detecção passiva: verifica se HTTP/2 está ativo e sem mitigação visível.
+    """
+    cve = "CVE-2023-44487"
+
+    if url.startswith("http://"):
+        collector.add(url, cve, "NOT_APPLICABLE",
+                      detail="HTTP plaintext — HTTP/2 não aplicável")
+        return
+
+    status, hdrs, body, raw = curl(url, extra_flags="-v --http2")
+
+    h2_active = (
+        "HTTP/2" in hdrs
+        or "server accepted h2" in raw.lower()
+        or "using http/2" in raw.lower()
+    )
+    if not h2_active:
+        collector.add(url, cve, "NOT_APPLICABLE",
+                      detail="HTTP/2 não negociado")
+        return
+
+    if "MAX_CONCURRENT_STREAMS" in raw or "GOAWAY" in raw:
+        collector.add(url, cve, "MITIGATED",
+                      detail="Mitigação detectada via frames HTTP/2")
+        return
+
+    parsed    = urlparse(url)
+    host      = parsed.hostname
+    port      = parsed.port or 443
+    repro_url = f"https://{host}:{port}"
+    version_note = f" | servidor: {server_info}" if server_info else ""
+
+    repro = (
+        f"# 1. Confirmar HTTP/2:\n"
+        f'curl -v --http2 "{url}"\n\n'
+        f"# 2. Validar RST_STREAM flood:\n"
+        f"go run main.go -url {repro_url} "
+        f"-requests 100 -concurrency 10 -delay 0 -wait 0\n\n"
+        f"# Confirmado se: Frames sent HEADERS=100, RST_STREAM=100"
+    )
+    collector.add(url, cve, "POSSIBLY_VULNERABLE",
+                  detail=f"HTTP/2 ativo — sem mitigação detectável{version_note}",
+                  curl_repro=repro)
