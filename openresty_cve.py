@@ -26,13 +26,13 @@ import sys
 import time
 import argparse
 import re
-from urllib.parse import urlparse
 
 try:
     from cve_base import (
         curl, curl_header_value,
         InteractshSession, ResultCollector,
         log, OUTPUT_FILE, INTERACTSH_WAIT,
+        check_cve_2023_44487,
     )
 except ImportError:
     print("[ERR] cve_base.py não encontrado no mesmo diretório.")
@@ -121,74 +121,6 @@ def check_cve_2026_42945(url, collector, iactsh):
         return
 
     collector.add(url, cve, "NOT_VULNERABLE", detail=f"HTTP {status}")
-
-
-def check_cve_2023_44487(url, collector, server_info=None):
-    """
-    Recebe url já filtrada pelo recon.py:
-    - Não é CDN conhecido
-    - É nginx/apache/haproxy confirmado
-    - URL tem protocolo + porta corretos
-    """
-    cve = "CVE-2023-44487"
-
-    # HTTP plaintext — skip
-    if url.startswith("http://"):
-        collector.add(url, cve, "NOT_APPLICABLE",
-                      detail="HTTP plaintext — HTTP/2 não aplicável")
-        return
-
-    status, hdrs, body, raw = curl(url, extra_flags="-v --http2")
-
-    # Nível 1 — HTTP/2 ativo?
-    h2_active = (
-        "HTTP/2" in hdrs
-        or "server accepted h2" in raw.lower()
-        or "using http/2" in raw.lower()
-    )
-    if not h2_active:
-        collector.add(url, cve, "NOT_APPLICABLE",
-                      detail="HTTP/2 não negociado")
-        return
-
-    # Nível 2 — Mitigação detectável?
-    has_stream_limit = "MAX_CONCURRENT_STREAMS" in raw
-    has_goaway       = "GOAWAY" in raw
-
-    if has_stream_limit or has_goaway:
-        collector.add(url, cve, "MITIGATED",
-                      detail="Mitigação detectada via frames HTTP/2")
-        return
-
-    # Nível 3 — Versão conhecida vulnerável? (via nmap banner)
-    version_note = ""
-    if server_info:
-        version_note = f" | servidor: {server_info}"
-
-    # Chegou aqui: HTTP/2 ativo, sem mitigação, não é CDN
-    # → POSSIBLY_VULNERABLE (curl não prova flood)
-    parsed    = urlparse(url)
-    host      = parsed.hostname
-    port      = parsed.port or 443
-    repro_url = f"https://{host}:{port}"
-
-    repro = (
-        f"# 1. Confirmar HTTP/2:\n"
-        f'curl -v --http2 "{url}"\n\n'
-        f"# 2. Validar RST_STREAM flood:\n"
-        f"go run main.go -url {repro_url} "
-        f"-requests 100 -concurrency 10 -delay 0 -wait 0\n\n"
-        f"# Confirmado se:\n"
-        f"# Frames sent: HEADERS=100, RST_STREAM=100\n"
-        f"# Frames received: 2 (apenas handshake)"
-    )
-
-    collector.add(url, cve, "POSSIBLY_VULNERABLE",
-                  detail=(
-                      f"HTTP/2 ativo — sem mitigação detectável"
-                      f"{version_note}"
-                  ),
-                  curl_repro=repro)
 
 
 def check_cve_2021_23017(url, nginx_ver, collector):
@@ -347,7 +279,7 @@ def check_cve_2022_24834(url, collector, iactsh):
                                   detail=f"SSRF OOB confirmado via {path}",
                                   curl_repro=repro, oob_hit=hit)
                     return
-            collector.add(url, cve, "VULNERABLE",
+            collector.add(url, cve, "POSSIBLY_VULNERABLE",
                           detail=f"Endpoint Redis exposto em {path} — validar SSRF manualmente",
                           curl_repro=f'curl -v "{probe}"')
             return
