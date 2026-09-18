@@ -20,15 +20,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIGURAÇÕES
 # ──────────────────────────────────────────────
 PORTS = "80,81,3000,3001,8443,10000,9000,9443,443,8080,8000,6885,4443,2075,2076,6443,3868,3366,9091,5900,8081,6000,8181,3306,5000,4000,5432,15672,9999,161,4044,7077"
-HTTPX_THREADS      = 80
+HTTPX_THREADS       = 80
 FINGERPRINT_THREADS = 20
-CURL_TIMEOUT       = 5   # segundos
+CURL_TIMEOUT        = 5   # segundos
+SSL_PORTS           = {"443", "8443", "9443", "6443", "4443", "2076", "10000"}
 
-# ── Caminhos dos scripts CVE (preencha aqui) ──
-NGINX_CVE_SCRIPT      = "/opt/scripts/nginx_cve.py"   # ex: "/opt/scripts/nginx_cve.py"
-APACHE_CVE_SCRIPT     = "/opt/scripts/apache_cve.py"   # ex: "/opt/scripts/apache_cve.py"
-OPENRESTY_CVE_SCRIPT  = "/opt/scripts/openresty_cve.py"   # ex: "/opt/scripts/openresty_cve.py"
-HAPROXY_CVE_SCRIPT    = "/opt/scripts/haproxy_cve.py"   # ex: "/opt/scripts/haproxy_cve.py"
+# CVE script paths auto-detected from same directory as this file
+_SCRIPT_DIR           = Path(__file__).resolve().parent
+NGINX_CVE_SCRIPT      = str(_SCRIPT_DIR / "nginx_cve.py")
+APACHE_CVE_SCRIPT     = str(_SCRIPT_DIR / "apache_cve.py")
+OPENRESTY_CVE_SCRIPT  = str(_SCRIPT_DIR / "openresty_cve.py")
+HAPROXY_CVE_SCRIPT    = str(_SCRIPT_DIR / "haproxy_cve.py")
 
 TOOLS_REQUIRED = ["subfinder", "assetfinder", "nmap", "httpx", "curl"]
 TOOLS_OPTIONAL = ["chaos", "github-subdomains", "shortscan"]
@@ -76,20 +78,29 @@ def log(msg, level="INFO"):
 
 
 def run_cmd(cmd, output_file=None, timeout=300):
-    """Executa comando e retorna stdout como string."""
-    log(f"$ {cmd}")
+    """Executa comando e retorna stdout como string.
+    cmd: lista de argumentos (preferido) ou string sem expansão shell.
+    """
+    import shlex as _shlex
+    if isinstance(cmd, list):
+        parts   = cmd
+        display = " ".join(_shlex.quote(p) for p in parts)
+    else:
+        parts   = _shlex.split(cmd)
+        display = cmd
+    log(f"$ {display}")
     try:
         result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=timeout
+            parts, capture_output=True, text=True, timeout=timeout
         )
         out = result.stdout.strip()
         if result.returncode != 0 and result.stderr:
             log(f"stderr: {result.stderr[:300]}", "WARN")
         if output_file and out:
-            Path(output_file).write_text(out + "\n")
+            Path(output_file).write_text(out + "\n", encoding="utf-8")
         return out
     except subprocess.TimeoutExpired:
-        log(f"Timeout ao executar: {cmd}", "WARN")
+        log(f"Timeout ao executar: {display}", "WARN")
         return ""
     except Exception as e:
         log(f"Erro: {e}", "ERR")
@@ -130,14 +141,14 @@ def write_lines(path, lines):
 
 def run_subfinder(domain, outdir):
     out = f"{outdir}/subfinder.txt"
-    run_cmd(f"subfinder -d {domain} -silent -o {out}", timeout=180)
-    return Path(out).read_text().splitlines() if Path(out).exists() else []
+    run_cmd(["subfinder", "-d", domain, "-silent", "-o", out], timeout=180)
+    return Path(out).read_text(encoding="utf-8").splitlines() if Path(out).exists() else []
 
 
 def run_assetfinder(domain, outdir):
     out = f"{outdir}/assetfinder.txt"
-    run_cmd(f"assetfinder --subs-only {domain} > {out}", timeout=120)
-    return Path(out).read_text().splitlines() if Path(out).exists() else []
+    run_cmd(["assetfinder", "--subs-only", domain], output_file=out, timeout=120)
+    return Path(out).read_text(encoding="utf-8").splitlines() if Path(out).exists() else []
 
 
 def run_chaos(domain, outdir):
@@ -148,8 +159,8 @@ def run_chaos(domain, outdir):
         log("CHAOS_KEY não definido — pulando chaos", "WARN")
         return []
     out = f"{outdir}/chaos.txt"
-    run_cmd(f"chaos -d {domain} -key {chaos_key} -silent -o {out}", timeout=120)
-    return Path(out).read_text().splitlines() if Path(out).exists() else []
+    run_cmd(["chaos", "-d", domain, "-key", chaos_key, "-silent", "-o", out], timeout=120)
+    return Path(out).read_text(encoding="utf-8").splitlines() if Path(out).exists() else []
 
 
 def run_github_subdomains(domain, outdir):
@@ -160,31 +171,41 @@ def run_github_subdomains(domain, outdir):
         log("GITHUB_TOKEN não definido — pulando github-subdomains", "WARN")
         return []
     out = f"{outdir}/github_subs.txt"
-    run_cmd(f"github-subdomains -d {domain} -t {token} -o {out}", timeout=120)
-    return Path(out).read_text().splitlines() if Path(out).exists() else []
+    run_cmd(["github-subdomains", "-d", domain, "-t", token, "-o", out], timeout=120)
+    return Path(out).read_text(encoding="utf-8").splitlines() if Path(out).exists() else []
 
 
 def collect_subdomains(domain, outdir):
     log("=== COLETA DE SUBDOMÍNIOS ===")
-    all_subs = []
 
-    all_subs += run_subfinder(domain, outdir)
-    log(f"subfinder: {len(all_subs)} até agora", "OK")
-
-    tmp = run_assetfinder(domain, outdir)
-    all_subs += tmp
-    log(f"assetfinder: +{len(tmp)}", "OK")
-
-    tmp = run_chaos(domain, outdir)
-    all_subs += tmp
-    log(f"chaos: +{len(tmp)}", "OK")
-
-    tmp = run_github_subdomains(domain, outdir)
-    all_subs += tmp
-    log(f"github-subdomains: +{len(tmp)}", "OK")
-
-    subs = dedup_sort([s for s in all_subs if domain in s])
+    # Resume: se já existe resultado anterior, reutiliza
     subs_file = f"{outdir}/subs_domain.txt"
+    if Path(subs_file).exists():
+        subs = [l.strip() for l in Path(subs_file).read_text(encoding="utf-8").splitlines() if l.strip()]
+        log(f"Resume: subs_domain.txt existente com {len(subs)} entradas", "OK")
+        return subs_file, subs
+
+    # Executa as 4 ferramentas em paralelo
+    runners = {
+        "subfinder":        lambda: run_subfinder(domain, outdir),
+        "assetfinder":      lambda: run_assetfinder(domain, outdir),
+        "chaos":            lambda: run_chaos(domain, outdir),
+        "github-subdomains": lambda: run_github_subdomains(domain, outdir),
+    }
+
+    all_subs: list[str] = []
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(fn): name for name, fn in runners.items()}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                result = future.result()
+                all_subs.extend(result)
+                log(f"{name}: {len(result)} subdomínios", "OK")
+            except Exception as e:
+                log(f"{name}: erro — {e}", "WARN")
+
+    subs = dedup_sort([s for s in all_subs if s == domain or s.endswith("." + domain)])
     write_lines(subs_file, subs)
     log(f"Total de subdomínios únicos: {len(subs)}", "OK")
     return subs_file, subs
@@ -291,8 +312,8 @@ def _find_pd_httpx():
     if httpx_in_path:
         try:
             r = subprocess.run(
-                f'echo "" | {httpx_in_path} -l /dev/stdin -silent 2>&1 | head -1',
-                shell=True, capture_output=True, text=True, timeout=8
+                [httpx_in_path, "-l", "/dev/stdin", "-silent"],
+                input="", capture_output=True, text=True, timeout=8
             )
             out = (r.stdout + r.stderr).lower()
             if "no such option" not in out and "usage: httpx [options] url" not in out:
@@ -317,22 +338,24 @@ def run_httpx(subs_file, outdir):
         log("Pulando httpx — fingerprint usará fallback via ips_ativos_com_protocolo.txt", "WARN")
         return None, None
 
-    cmd = (
-        f"{httpx_bin} -l {subs_file} "
-        f"-ports {PORTS} "
-        f"-threads {HTTPX_THREADS} "
-        f"-json "
-        f"-o {alive_json}"
+    run_cmd(
+        [httpx_bin, "-l", subs_file, "-ports", PORTS,
+         "-threads", str(HTTPX_THREADS), "-json", "-o", alive_json],
+        timeout=900,
     )
-    run_cmd(cmd, timeout=900)
 
-    cmd2 = (
-        f"{httpx_bin} -l {subs_file} "
-        f"-ports {PORTS} "
-        f"-threads {HTTPX_THREADS} "
-        f"-o {alive_file}"
-    )
-    run_cmd(cmd2, timeout=900)
+    # Deriva alive.txt a partir do JSON (evita segunda execução)
+    urls: list[str] = []
+    if Path(alive_json).exists():
+        for line in Path(alive_json).read_text(encoding="utf-8").splitlines():
+            try:
+                url = json.loads(line).get("url", "")
+                if url:
+                    urls.append(url)
+            except Exception:
+                pass
+    if urls:
+        write_lines(alive_file, sorted(set(urls)))
 
     return alive_file, alive_json
 
@@ -460,8 +483,9 @@ def _fingerprint_url(url: str, nmap_banners: dict) -> tuple[str, str]:
     # 2. curl header Server: desta URL específica (porta inclusa)
     try:
         result = subprocess.run(
-            f"curl -sk -o /dev/null -D - --max-time {CURL_TIMEOUT} {url}",
-            shell=True, capture_output=True, text=True, timeout=CURL_TIMEOUT + 2
+            ["curl", "-sk", "-o", "/dev/null", "-D", "-",
+             "--max-time", str(CURL_TIMEOUT), url],
+            capture_output=True, text=True, timeout=CURL_TIMEOUT + 2
         )
         for line in result.stdout.splitlines():
             if line.lower().startswith("server:"):
@@ -477,8 +501,8 @@ def _fingerprint_url(url: str, nmap_banners: dict) -> tuple[str, str]:
     try:
         error_url = url.rstrip("/") + "/____recon_probe_404____"
         result = subprocess.run(
-            f"curl -sk --max-time {CURL_TIMEOUT} {error_url}",
-            shell=True, capture_output=True, text=True, timeout=CURL_TIMEOUT + 2
+            ["curl", "-sk", "--max-time", str(CURL_TIMEOUT), error_url],
+            capture_output=True, text=True, timeout=CURL_TIMEOUT + 2
         )
         body = result.stdout.lower()
         if "openresty" in body:
@@ -606,10 +630,21 @@ def _run_shortscan(url: str, outdir: str = ""):
         log("shortscan não instalado — pulando IIS scan", "WARN")
         return
     log(f"Executando shortscan em {url}")
-    out_flag = ""
-    if outdir:
-        out_flag = f'>> "{outdir}/shortscan_results.txt" 2>&1'
-    run_cmd(f'shortscan "{url}" {out_flag}', timeout=120)
+    try:
+        result = subprocess.run(
+            ["shortscan", url],
+            capture_output=True, text=True, timeout=120
+        )
+        out = result.stdout
+        if outdir and out:
+            with open(Path(outdir) / "shortscan_results.txt", "a", encoding="utf-8") as f:
+                f.write(out)
+        elif out:
+            print(out)
+    except subprocess.TimeoutExpired:
+        log(f"Timeout shortscan: {url}", "WARN")
+    except Exception as e:
+        log(f"Erro shortscan: {e}", "ERR")
 
 
 def dispatch_cve_scripts(
@@ -730,7 +765,6 @@ def build_output_files(entries, nmap_results, outdir):
     write_lines(sub_ports_file, sorted(sub_ports))
 
     # ── 2. IPs com http/https
-    SSL_PORTS = {"443", "8443", "9443", "6443", "4443", "2076", "10000"}
     ip_url_set = set()
     for e in entries:
         ip     = e["ip"]
